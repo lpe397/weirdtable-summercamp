@@ -306,6 +306,15 @@ but the ephemeral wp-cli does not (re-fetch the phar after each rebuild).
 
 - **Claude Code runs on the trusted side (Scorpius), NOT on wp01** (DMZ).
 - Scorpius → wp01 is SSH **key-auth** (ed25519); `sudo` on wp01 still prompts (correct).
+- **Privileged-step workflow (sudo can't go through Claude's Bash tool — no TTY).**
+  Claude stages scripts on wp01 via `scp` (checksum-verify both ends). The USER runs
+  the privileged build/test in their own terminal: `ssh -t localadmin@172.22.3.26
+  'bash /srv/aegis/wordpress/<script>.sh 2>&1 | tee /tmp/<name>.log'` (one sudo
+  prompt; sudo caches for the rest). Then Claude reads results **non-privileged**:
+  `ssh localadmin@172.22.3.26 'cat /tmp/<name>.log'` — no copy-paste. The `!`-prefix
+  in Claude's prompt does NOT allocate a TTY, so sudo prompts fail there; use a real
+  terminal. localadmin is intentionally out of the `docker` group, so docker needs
+  `sudo` (kept; don't add NOPASSWD or the docker group on this DMZ box without cause).
 - Deploy path now: edit in repo → commit/push → `scp` file(s) to wp01 → rebuild.
   Future: wp01 read-only deploy key + DMZ_404 outbound-22 → `git pull` loop.
 - BuildKit can serve a stale image — verify the running version via the app, not
