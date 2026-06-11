@@ -22,3 +22,28 @@ RUN set -eux; \
         unzip -q /tmp/p.zip -d wp-content/plugins/; \
         rm /tmp/p.zip; \
     done
+
+# Pretty permalinks (required by BuddyPress 12+ rewrites for directory + member
+# pages). The base Debian Apache sets AllowOverride None on /var/www, so the
+# WordPress .htaccess rewrite rules are ignored and every pretty URL 404s.
+# Permit overrides on the docroot, ensure mod_rewrite, and bake the standard
+# WordPress .htaccess — the entrypoint copies it from the source tree into the
+# docroot on container start. Static + immutable (DISALLOW_FILE_MODS won't let
+# WP regenerate it at runtime, which is exactly what we want).
+RUN set -eux; \
+    a2enmod rewrite; \
+    printf '%s\n' '<Directory /var/www/html/>' '    AllowOverride All' '</Directory>' \
+      > /etc/apache2/conf-available/wp-permalinks.conf; \
+    a2enconf wp-permalinks; \
+    { \
+      echo '# BEGIN WordPress'; \
+      echo '<IfModule mod_rewrite.c>'; \
+      echo 'RewriteEngine On'; \
+      echo 'RewriteBase /'; \
+      echo 'RewriteRule ^index\.php$ - [L]'; \
+      echo 'RewriteCond %{REQUEST_FILENAME} !-f'; \
+      echo 'RewriteCond %{REQUEST_FILENAME} !-d'; \
+      echo 'RewriteRule . /index.php [L]'; \
+      echo '</IfModule>'; \
+    } > /usr/src/wordpress/.htaccess; \
+    chown www-data:www-data /usr/src/wordpress/.htaccess
