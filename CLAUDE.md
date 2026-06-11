@@ -1,10 +1,14 @@
 # WORDPRESS ON wp01 — BUILD SEED / CLAUDE.md (v3)
 
-**Status:** Skeleton VALIDATED (Docker, WP 6.9.4, MariaDB 11.4, immutable defines
-live). **Mid step 4 (tier A):** plugins pinned, tier-A Dockerfile written below,
-NOT yet built/deployed/smoke-tested. NOT done beyond that: child theme,
-hardening MU-plugin, registration gate, event-workflow plugins, HAProxy/TLS/DNS,
-git-based deploy loop to wp01.
+**Status:** **TIER A DONE.** Image built + deployed to wp01 + BuddyPress
+smoke-test gate PASSED on 6.9.4 (BuddyPress 14.3.4 + WP Mail SMTP 4.8.0 activate,
+Activity + Extended Profiles enable with no 500, "Mailing Address" xProfile field
+creates, ZERO PHP fatals). Pretty-permalink Apache fix baked (AllowOverride +
+.htaccess). **One known-open item carried to the configure step:** BP-12 directory
+URL rendering (`/activity/`, `/members/`) soft-200s to the homepage — a BuddyPress
+*Rewrites* config matter, NOT a 6.9.4 fatal (see §3 Tier A note + §4 lesson 6).
+**Next = TIER B** (child theme, registration gate, hardening MU-plugin, Akismet).
+NOT done beyond that: HAProxy/TLS/DNS, git-based deploy loop to wp01.
 **Date:** 2026-06-11
 **Parent project:** Summercamp (self-hosted site to replace the Facebook group)
 **Supersedes:** the parked v1 seed (full functional spec / Domino narrative lives
@@ -18,10 +22,11 @@ This file is the project memory. Interaction Preferences from the Aegis seed app
 (direct, objective, sudo on admin cmds, delta edits, verify versions before
 asserting, one step at a time, challenge bad ideas, no epicycles).
 
-**CURRENT TASK = TIER A ONLY.** Bake **BuddyPress + WP Mail SMTP** (just those two),
-deploy to wp01, and smoke-test BuddyPress on 6.9.4. **Do NOT bake the full plugin
-set in one shot** — the tiering below exists to isolate the one real unknown
-(does BuddyPress run on 6.9.4). Tiers B and C come in later rebuilds.
+**TIER A COMPLETE** (built, deployed, gate PASSED — see §3 Tier A). **CURRENT TASK
+= TIER B.** Rebuild adding: TT25 child theme (style BuddyPress surfaces),
+invite-only registration gate, hardening MU-plugin, Akismet activation. **Do NOT
+bake the full plugin set in one shot** — keep the tiering so failures stay
+localized; verify each addition on its own. Tier C (event workflow) comes after.
 
 **Edit in this repo only.** Deploy to wp01 via the repo→wp01 path (scp for now;
 git-pull loop later). Never edit files live on wp01.
@@ -100,9 +105,26 @@ in the served tree. Baking into `/var/www/html` directly is the wrong location.
 Plugin zips: `https://downloads.wordpress.org/plugin/{slug}.{version}.zip`.
 `DISALLOW_FILE_MODS` blocks *installing/updating*, NOT *activating* baked plugins.
 
-#### TIER A (CURRENT) — keystone + mail transport
+#### TIER A (DONE ✓) — keystone + mail transport
 
-**Dockerfile (replace the thin one):**
+**RESULT (2026-06-11): gate PASSED.** Built on wp01, all objective checks green —
+baked plugins present (`akismet, buddypress, hello.php, index.php, wp-mail-smtp`),
+served version `6.9.4`, immutable defines `bool(true)` ×2, no PHP fatals. Smoke
+test (scripted via ephemeral wp-cli in the running container): BuddyPress + WP Mail
+SMTP activate; Activity + Extended Profiles enable, no 500; "Mailing Address"
+xProfile field (ID 2) creates and lists; zero fatals. **One open item deferred to
+the configure step** (the `THEN` block, in the real-domain context after Step 5):
+BP-12 directory URL rendering — `/activity/` and `/members/<user>/` soft-200 to the
+homepage. Root cause is BuddyPress *Rewrites* (BP 12+ routes directories via a
+`buddypress` custom post type + WP Rewrite rules, NOT real WP pages), with known
+front-page / trailing-slash interactions; a headless `wp rewrite flush` doesn't
+fully register the rules. NOT a 6.9.4 fatal. **Fix at configure time, over HTTPS
+with `WP_HOME`/`WP_SITEURL` set:** wp-admin → BuddyPress → Settings → URLs; Settings
+→ Permalinks → Save (full-context flush); decide static front page; if Rewrites
+still fights the setup, evaluate **BP Classic** (neutralizes Rewrites → legacy
+page routing). Tier B child theme then styles the BP surfaces. See §4 lesson 6.
+
+**Dockerfile (AS BUILT — keystone plugins + pretty-permalink Apache fix):**
 ```dockerfile
 # Summercamp WordPress — immutable image
 # Parent theme (Twenty Twenty-Five) ships in the base image.
@@ -128,6 +150,28 @@ RUN set -eux; \
         unzip -q /tmp/p.zip -d wp-content/plugins/; \
         rm /tmp/p.zip; \
     done
+
+# Pretty permalinks (BuddyPress 12+ rewrites need them). Base Debian Apache sets
+# AllowOverride None on /var/www → WP .htaccess ignored → every pretty URL 404s.
+# Allow overrides on the docroot, ensure mod_rewrite, bake the standard WP
+# .htaccess (entrypoint copies it into the docroot on start). Static + immutable.
+RUN set -eux; \
+    a2enmod rewrite; \
+    printf '%s\n' '<Directory /var/www/html/>' '    AllowOverride All' '</Directory>' \
+      > /etc/apache2/conf-available/wp-permalinks.conf; \
+    a2enconf wp-permalinks; \
+    { \
+      echo '# BEGIN WordPress'; \
+      echo '<IfModule mod_rewrite.c>'; \
+      echo 'RewriteEngine On'; \
+      echo 'RewriteBase /'; \
+      echo 'RewriteRule ^index\.php$ - [L]'; \
+      echo 'RewriteCond %{REQUEST_FILENAME} !-f'; \
+      echo 'RewriteCond %{REQUEST_FILENAME} !-d'; \
+      echo 'RewriteRule . /index.php [L]'; \
+      echo '</IfModule>'; \
+    } > /usr/src/wordpress/.htaccess; \
+    chown www-data:www-data /usr/src/wordpress/.htaccess
 ```
 
 **Deploy (repo = truth; scp transport for now):**
@@ -145,15 +189,17 @@ sudo docker compose exec wordpress ls wp-content/plugins   # expect buddypress +
 outbound-22 rule — ansible01's pattern — is the eventual clean `git pull` loop;
 not blocking. scp is fine because the repo already holds the committed truth.)
 
-**Smoke-test the BuddyPress gate (this is the accepted decision — actually run it).**
-Installing now against the IP is safe: the `WP_HOME`/`WP_SITEURL` constants set at
-the HAProxy step override whatever the installer writes, so it self-corrects.
-1. Browser → `http://172.22.3.26/wp-admin/install.php` → install (title "Summercamp", make admin user).
-2. Plugins → activate **BuddyPress** + **WP Mail SMTP**.
-3. Settings → BuddyPress → Components: enable Activity + Extended Profiles, save (no 500).
-4. Visit Activity page — renders. Users → Profile Fields → add "Mailing Address" — saves, shows on a member profile.
-5. `sudo docker compose logs --tail=50 wordpress` — no PHP fatals.
-PASS all → 14.3.4 runs clean on 6.9.4, gate satisfied, proceed to tier B. Any fatal → stop, capture the log line.
+**Smoke-test the BuddyPress gate — DONE (PASSED, 2026-06-11).** Ran scripted via
+wp-cli dropped into the *running* container (image stays immutable; it vanishes on
+the next rebuild). Site installed against the IP (title "Summercamp", admin user
+`scadmin`) — safe because the `WP_HOME`/`WP_SITEURL` constants set at the HAProxy
+step override the DB. Verified: both plugins activate; Activity + Extended Profiles
+enable (no 500); "Mailing Address" xProfile field creates + lists; no fatals. The
+only sub-step not green is the Activity/member *directory render* — see the Tier A
+RESULT note above (BP-Rewrites config, deferred to the configure step).
+NOTE for re-runs: `wp bp xprofile field create` is NOT idempotent (re-running adds
+a duplicate field); the WP install + DB persist on the bind mount across rebuilds,
+but the ephemeral wp-cli does not (re-fetch the phar after each rebuild).
 
 #### TIER B (next) — branding + the security gate
 - **TT25 child theme** baked into the image (style.css + theme.json with the
@@ -190,6 +236,13 @@ PASS all → 14.3.4 runs clean on 6.9.4, gate satisfied, proceed to tier B. Any 
   serves it. Publish Cloudflare A → WAN VIP. Use the per-zone `CF_DNS_weirdtable` token.
 
 ### THEN
+- **Finish BP-12 directory routing (carried from Tier A).** Over HTTPS with
+  `WP_HOME`/`WP_SITEURL` set: wp-admin → BuddyPress → Settings → URLs; Settings →
+  Permalinks → Save (full-context flush — headless `wp rewrite flush` wasn't
+  enough); decide static front page (BP Rewrites has a known front-page conflict);
+  retest `/activity/` + `/members/<user>/` render real BP markup (not a soft-200 to
+  the homepage). If Rewrites still fights it → activate **BP Classic** (legacy
+  page routing). See §3 Tier A RESULT + §4 lesson 6.
 - Configure plugins, BuddyPress xProfile address fields, invite gate, WP Mail SMTP → Mailcow.
 - Mailcow tie-in: create `summercamp@weirdtable.org` (or pending `noreply@`) for site outbound.
 
@@ -213,6 +266,25 @@ PASS all → 14.3.4 runs clean on 6.9.4, gate satisfied, proceed to tier B. Any 
    the wordpress.org number. For everything else the label is a fine first filter.
 5. **Docker's official apt repo has a real `trixie` channel** (Docker CE 29.x) —
    no codename hack on Debian 13.
+6. **BuddyPress 12+ routes directories via a `buddypress` custom post type + WP
+   Rewrites, NOT real WP pages.** So `bp-pages` IDs won't appear in
+   `wp post list --post_type=page` (they're the CPT), and `bp_core_add_page_mappings()`
+   is the wrong lever to "create pages." Symptom of a broken setup: directory URLs
+   (`/activity/`, `/members/`) **soft-200 to the homepage** (body byte-identical to
+   `/` → catch it by diffing body size, not just the HTTP code). A headless
+   `wp rewrite flush` doesn't fully register BP's rules; the reliable fix is a
+   full-context flush (wp-admin Settings → Permalinks → Save) once on the final
+   domain, or **BP Classic** to fall back to legacy page routing.
+7. **Pretty permalinks need AllowOverride on the official wordpress:apache image.**
+   Base Debian Apache ships `AllowOverride None` on `/var/www`, so WP's `.htaccess`
+   rewrite rules are ignored and EVERY pretty URL 404s (not just BP). Bake an
+   `AllowOverride All` conf for the docroot + `a2enmod rewrite` + a static
+   `.htaccess` into `/usr/src/wordpress/`. Distinguish this Apache 404 (server
+   error page) from a WP 404 (themed "Page not found") when diagnosing.
+8. **wp-cli for one-off ops: drop the phar into the RUNNING container, not the
+   image** (`curl … wp-cli.phar -o /usr/local/bin/wp`); run it as `-u www-data` with
+   `HOME=/tmp WP_CLI_CACHE_DIR=/tmp`. Keeps the image immutable; re-fetch after each
+   rebuild (the writable layer is discarded). DB + uploads persist (bind mounts).
 
 ---
 
