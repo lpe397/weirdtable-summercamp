@@ -1,0 +1,42 @@
+services:
+  db:
+    image: mariadb:11.4
+    restart: unless-stopped
+    env_file: .env
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - ./data/db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [wpnet]
+
+  wordpress:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      WORDPRESS_CONFIG_EXTRA: |
+        // Trust HAProxy TLS termination: set HTTPS on when proxied
+        if ( isset($$_SERVER['HTTP_X_FORWARDED_PROTO']) && $$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https' ) {
+            $$_SERVER['HTTPS'] = 'on';
+        }
+        // Immutable model: no in-place core/plugin/theme changes
+        define( 'DISALLOW_FILE_MODS', true );
+        define( 'AUTOMATIC_UPDATER_DISABLED', true );
+    volumes:
+      - ./data/uploads:/var/www/html/wp-content/uploads
+    ports:
+      - "80:80"
+    networks: [wpnet]
+
+networks:
+  wpnet:
+    driver: bridge
